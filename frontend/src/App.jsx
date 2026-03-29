@@ -66,19 +66,29 @@ function App() {
     formData.append("ine", ine)
     formData.append("selfie", selfie)
 
+    console.log(`[KYC] Enviando a ${API_URL}/api/verificar`)
+    console.log(`[KYC] INE: ${ine.name} (${(ine.size / 1024).toFixed(1)}KB), Selfie: ${selfie.name} (${(selfie.size / 1024).toFixed(1)}KB)`)
+    const t0 = performance.now()
+
     try {
       const respuesta = await fetch(`${API_URL}/api/verificar`, {
         method: "POST",
         body: formData,
       })
+      const elapsed = ((performance.now() - t0) / 1000).toFixed(1)
+      console.log(`[KYC] Respuesta: ${respuesta.status} en ${elapsed}s`)
+
       if (!respuesta.ok) {
         const errorData = await respuesta.json()
+        console.error(`[KYC] Error del servidor:`, errorData)
         setResultados({ error: errorData.detail || "Error del servidor" })
         return
       }
       const datos = await respuesta.json()
+      console.log(`[KYC] Resultado:`, datos)
       setResultados(datos)
     } catch (error) {
+      console.error(`[KYC] Error de conexion:`, error.message)
       setResultados({ error: "Error de conexion con el servidor. Verifica que el backend este corriendo." })
     } finally {
       setCargando(false)

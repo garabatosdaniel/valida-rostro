@@ -203,30 +203,43 @@ async def verificar_identidad(
         )
 
     try:
+        import time
+        t_total = time.time()
+
         # Paso 1 (LOCAL): Leer imagenes
         ine_bytes = await ine.read()
         selfie_bytes = await selfie.read()
         ine_img = bytes_a_imagen(ine_bytes)
         selfie_img = bytes_a_imagen(selfie_bytes)
+        print(f"[KYC] Imagenes recibidas: INE={len(ine_bytes)//1024}KB, Selfie={len(selfie_bytes)//1024}KB")
 
         # Paso 2 (LOCAL): Recortar el rostro principal de cada imagen
+        t0 = time.time()
         rostro_ine = detectar_rostro_principal(ine_img)
         rostro_selfie = detectar_rostro_principal(selfie_img)
+        print(f"[KYC] Deteccion de rostros: {time.time()-t0:.2f}s")
 
         # Paso 3 (LOCAL): Extraer texto de la INE con EasyOCR
+        t0 = time.time()
         textos = lector_ocr.readtext(ine_img, detail=0)
         texto_extraido = "\n".join(textos) if textos else "No se encontro texto"
+        print(f"[KYC] OCR: {time.time()-t0:.2f}s ({len(textos)} textos encontrados)")
 
         # Paso 4 (REMOTO): Comparar rostros con doble verificacion
         rostro_ine_b64 = imagen_a_base64(rostro_ine)
         rostro_selfie_b64 = imagen_a_base64(rostro_selfie)
         imagenes = [rostro_ine_b64, rostro_selfie_b64]
+        print(f"[KYC] Recortes: INE={len(rostro_ine_b64)//1024}KB, Selfie={len(rostro_selfie_b64)//1024}KB")
 
+        t0 = time.time()
         with ThreadPoolExecutor(max_workers=2) as executor:
             futuro_1 = executor.submit(llamar_openrouter, MODELO_1, PROMPT_COMPARACION, imagenes)
             futuro_2 = executor.submit(llamar_openrouter, MODELO_2, PROMPT_COMPARACION, imagenes)
             resultado_1 = futuro_1.result()
             resultado_2 = futuro_2.result()
+        print(f"[KYC] OpenRouter doble verificacion: {time.time()-t0:.2f}s")
+        print(f"[KYC] Modelo 1 ({MODELO_1}): misma={resultado_1.get('misma_persona')}, sim={resultado_1.get('similitud')}")
+        print(f"[KYC] Modelo 2 ({MODELO_2}): misma={resultado_2.get('misma_persona')}, sim={resultado_2.get('similitud')}")
 
         # Paso 5: Doble verificacion - ambos deben aprobar
         match_1 = resultado_1.get("misma_persona", False)
@@ -244,6 +257,9 @@ async def verificar_identidad(
             explicacion = f"Resultado parcial: un modelo aprueba y otro rechaza. {exp_1 or exp_2}"
         else:
             explicacion = exp_1 if len(exp_1) >= len(exp_2) else exp_2
+
+        print(f"[KYC] RESULTADO: misma_persona={misma_persona}, similitud={similitud}%")
+        print(f"[KYC] Tiempo total: {time.time()-t_total:.2f}s")
 
         return {
             "misma_persona": misma_persona,

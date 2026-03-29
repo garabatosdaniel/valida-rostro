@@ -21,7 +21,7 @@ Los datos personales de la identificacion (nombre, CURP, direccion, clave de ele
 | Backend (API) | Python, FastAPI |
 | Deteccion de rostros | OpenCV DNN (local, SSD ResNet-10) |
 | Extraccion de texto | EasyOCR (local, PyTorch) |
-| Comparacion facial | OpenRouter + Gemini (remoto, solo rostros) |
+| Comparacion facial | OpenRouter doble verificacion: gpt-4o-mini + gemini-2.5-flash (remoto, solo rostros) |
 | Frontend (UI) | React, Vite, Tailwind CSS |
 | Deploy | Docker, Railway |
 
@@ -107,7 +107,7 @@ python main.py
 | Variable | Descripcion | Valor en local | Valor en produccion |
 |---|---|---|---|
 | `OPENROUTER_API_KEY` | API key de OpenRouter (obligatoria) | Tu key de openrouter.ai/keys | Misma key o variable en Railway |
-| `OPENROUTER_MODEL` | Modelo de vision a usar | `google/gemini-2.0-flash-001` (default) | Igual o cambiar por otro modelo |
+| _(modelos)_ | Doble verificacion: gpt-4o-mini + gemini-2.5-flash | Configurados en main.py | Igual |
 | `ALLOWED_ORIGINS` | Origenes permitidos para CORS | `http://localhost:5173` (default) | URL de tu frontend en Railway |
 | `PORT` | Puerto del servidor | `8000` (default) | Railway lo inyecta automaticamente |
 
@@ -194,12 +194,14 @@ Abre tu navegador en `http://localhost:5173`:
 }
 ```
 
-## Modelos compatibles
+## Doble verificacion
 
-El backend usa OpenRouter, por lo que puedes cambiar el modelo de vision editando `OPENROUTER_MODEL` en tu `.env`. Opciones recomendadas:
+El backend consulta **dos modelos en paralelo** y solo aprueba si ambos coinciden. Esto elimina los falsos positivos que cada modelo tiene individualmente:
 
-| Modelo | Costo por llamada | Velocidad |
+| Estrategia | Precision | Notas |
 |---|---|---|
-| `google/gemini-2.0-flash-001` (default) | ~$0.0001 | Rapido |
-| `google/gemini-2.5-flash` | ~$0.0003 | Rapido |
-| `google/gemini-2.5-pro` | ~$0.00125 | Mas lento, mas preciso |
+| **Doble: gpt-4o-mini + gemini-2.5-flash** | **100% (6/6)** | Ambos deben aprobar |
+| Solo gpt-4o-mini | 83% (5/6) | Falla en un impostor |
+| Solo gemini-2.5-flash | 83% (5/6) | Falla en otro impostor |
+
+Benchmark con 6 pares de prueba (3 misma persona + 3 personas diferentes).

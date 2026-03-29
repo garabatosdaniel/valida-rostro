@@ -1,31 +1,22 @@
 # =============================================================================
 # main.py - Servidor Backend del Validador KYC
 # =============================================================================
-# Este archivo es el "cerebro" de la aplicacion. Recibe dos imagenes
-# (una INE/identificacion y una selfie), las compara usando IA para
-# determinar si son la misma persona, y extrae el texto visible.
-#
-# Enfoque hibrido de privacidad:
-#   - Deteccion de rostros: LOCAL (OpenCV DNN) - nada sale de tu computadora
-#   - Extraccion de texto:  LOCAL (EasyOCR) - nada sale de tu computadora
-#   - Comparacion facial:   OpenRouter/Gemini - solo se envian recortes de rostro
-#                           (sin datos personales, sin texto de la INE)
-#
-# Tecnologias:
-#   - FastAPI: Framework web rapido para crear la API REST
-#   - OpenCV DNN: Deteccion y recorte de rostros (local, sin GPU)
-#   - EasyOCR: Extraccion de texto de la identificacion (local)
-#   - OpenRouter + Gemini: Comparacion facial (solo recortes de rostro)
+# Enfoque hibrido de privacidad con doble verificacion:
+#   - Deteccion de rostros: LOCAL (OpenCV DNN)
+#   - Extraccion de texto:  LOCAL (EasyOCR)
+#   - Comparacion facial:   REMOTO (doble verificacion: gpt-4o-mini + gemini-2.5-flash)
+#                           Solo se envian recortes de rostro (~100-200KB)
+#                           Ningun dato personal sale de tu computadora
 #
 # Para correr en local:
 #   python main.py
 # =============================================================================
 
 import os
-import io
 import base64
 import json
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
@@ -42,7 +33,7 @@ load_dotenv()
 app = FastAPI(
     title="KYC Validador de Identidad",
     description="API para verificacion facial y extraccion de texto (OCR)",
-    version="3.0.0"
+    version="3.1.0"
 )
 
 # -----------------------------------------------------------------------------
@@ -62,8 +53,11 @@ app.add_middleware(
 # 3. CONFIGURACION DE OPENROUTER
 # -----------------------------------------------------------------------------
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemini-2.0-flash-001")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# Doble verificacion: dos modelos que fallan en casos diferentes
+MODELO_1 = "openai/gpt-4o-mini"
+MODELO_2 = "google/gemini-2.5-flash"
 
 if not OPENROUTER_API_KEY:
     print("ADVERTENCIA: No se encontro OPENROUTER_API_KEY en las variables de entorno.")
@@ -71,8 +65,6 @@ if not OPENROUTER_API_KEY:
 # -----------------------------------------------------------------------------
 # 4. CARGA DE MODELOS LOCALES
 # -----------------------------------------------------------------------------
-# 4a. Detector de rostros OpenCV DNN (SSD basado en ResNet-10)
-# Detecta rostros con alta precision sin necesidad de GPU ni TensorFlow.
 MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
 face_net = cv2.dnn.readNetFromCaffe(
     os.path.join(MODELS_DIR, "deploy.prototxt"),
@@ -80,7 +72,6 @@ face_net = cv2.dnn.readNetFromCaffe(
 )
 print("Modelo de deteccion facial cargado (OpenCV DNN).")
 
-# 4b. EasyOCR para extraccion de texto (local, usa PyTorch)
 print("Cargando modelo OCR EasyOCR (idioma: espanol)...")
 lector_ocr = easyocr.Reader(['es'], gpu=False)
 print("Modelo OCR cargado exitosamente.")
@@ -102,9 +93,6 @@ def detectar_rostro_principal(img: np.ndarray, min_confianza: float = 0.5) -> np
     """
     Detecta todos los rostros en la imagen usando OpenCV DNN y retorna
     el recorte del rostro mas grande (mayor area en pixeles).
-
-    Esto es clave para la INE: tiene una foto principal (grande, color)
-    y una foto fantasma (pequena, gris). Siempre tomamos la mas grande.
     """
     h, w = img.shape[:2]
     blob = cv2.dnn.blobFromImage(img, 1.0, (300, 300), (104.0, 177.0, 123.0))
@@ -117,7 +105,6 @@ def detectar_rostro_principal(img: np.ndarray, min_confianza: float = 0.5) -> np
         if confianza > min_confianza:
             box = detecciones[0, 0, i, 3:7] * np.array([w, h, w, h])
             x1, y1, x2, y2 = box.astype(int)
-            # Clamp a los limites de la imagen
             x1, y1 = max(0, x1), max(0, y1)
             x2, y2 = min(w, x2), min(h, y2)
             area = (x2 - x1) * (y2 - y1)
@@ -127,10 +114,8 @@ def detectar_rostro_principal(img: np.ndarray, min_confianza: float = 0.5) -> np
     if not rostros:
         raise ValueError("No se detecto ningun rostro en la imagen")
 
-    # Tomar el rostro mas grande
     x1, y1, x2, y2, _ = max(rostros, key=lambda r: r[4])
 
-    # Agregar padding del 20% para incluir mas contexto facial
     pad_w = int(0.2 * (x2 - x1))
     pad_h = int(0.2 * (y2 - y1))
     x1 = max(0, x1 - pad_w)
@@ -147,10 +132,10 @@ def imagen_a_base64(img: np.ndarray) -> str:
     return base64.b64encode(buffer).decode()
 
 
-def llamar_openrouter(prompt: str, imagenes_b64: list[str]) -> dict:
+def llamar_openrouter(modelo: str, prompt: str, imagenes_b64: list[str]) -> dict:
     """
-    Envia un prompt con imagenes a OpenRouter y retorna la respuesta parseada.
-    NOTA: en esta version solo se envian recortes de rostro, no la INE completa.
+    Envia un prompt con imagenes a un modelo especifico via OpenRouter.
+    NOTA: solo se envian recortes de rostro, no la INE completa.
     """
     content = [{"type": "text", "text": prompt}]
     for img in imagenes_b64:
@@ -160,7 +145,7 @@ def llamar_openrouter(prompt: str, imagenes_b64: list[str]) -> dict:
         })
 
     body = json.dumps({
-        "model": OPENROUTER_MODEL,
+        "model": modelo,
         "messages": [{"role": "user", "content": content}],
         "temperature": 0,
     }).encode()
@@ -170,11 +155,10 @@ def llamar_openrouter(prompt: str, imagenes_b64: list[str]) -> dict:
         "Content-Type": "application/json",
     })
 
-    resp = urllib.request.urlopen(req, timeout=60)
+    resp = urllib.request.urlopen(req, timeout=90)
     data = json.loads(resp.read())
     respuesta_texto = data["choices"][0]["message"]["content"]
 
-    # Gemini a veces envuelve el JSON en ```json ... ```, lo limpiamos
     respuesta_texto = respuesta_texto.strip()
     if respuesta_texto.startswith("```"):
         respuesta_texto = respuesta_texto.split("\n", 1)[1]
@@ -185,21 +169,27 @@ def llamar_openrouter(prompt: str, imagenes_b64: list[str]) -> dict:
 # -----------------------------------------------------------------------------
 # 6. ENDPOINT PRINCIPAL: /api/verificar
 # -----------------------------------------------------------------------------
-# Flujo de privacidad:
-#   1. Recibe INE + selfie
-#   2. LOCAL: OpenCV detecta y recorta el rostro principal de cada imagen
-#   3. LOCAL: EasyOCR extrae el texto de la INE completa
-#   4. REMOTO: Solo los recortes de rostro se envian a Gemini para comparar
-#   -> Ningun dato personal (nombre, CURP, direccion) sale de tu computadora
+# Flujo:
+#   1. LOCAL: OpenCV recorta el rostro principal de INE y selfie
+#   2. LOCAL: EasyOCR extrae texto de la INE
+#   3. REMOTO: Solo los recortes de rostro se envian a dos modelos en paralelo
+#   4. Doble verificacion: ambos deben aprobar
+#   -> Ningun dato personal sale de tu computadora
 
-PROMPT_COMPARACION = """Analiza estas dos fotos de rostros. La primera es un recorte de una identificacion oficial y la segunda es una selfie.
+PROMPT_COMPARACION = """Compara los rostros en estas dos fotos analizando unicamente la estructura osea y rasgos permanentes:
+- Forma del craneo y proporcion de la frente
+- Estructura de pomulos y mandibula
+- Forma y tamano de la nariz (puente, punta, aletas)
+- Distancia entre los ojos y su forma
+- Forma de los labios
+- Proporcion general del rostro (redondo, ovalado, cuadrado, alargado)
 
-Determina si es la misma persona comparando rasgos faciales.
+No consideres: lentes, vello facial, peinado, maquillaje, peso, iluminacion ni angulo de la foto. Dos personas pueden verse parecidas por usar lentes similares o tener barba parecida, pero eso no significa que sean la misma persona.
 
-Responde UNICAMENTE con un JSON valido con esta estructura exacta:
-{"misma_persona": true/false, "similitud": 0-100}
+Si tienes duda, responde false.
 
-No agregues explicaciones, solo el JSON."""
+Responde solo con JSON:
+{"misma_persona": true/false, "similitud": 0-100, "explicacion": "una frase breve explicando las coincidencias o diferencias clave encontradas"}"""
 
 @app.post("/api/verificar")
 async def verificar_identidad(
@@ -213,41 +203,57 @@ async def verificar_identidad(
         )
 
     try:
-        # --- Paso 1: Leer imagenes en memoria ---
+        # Paso 1 (LOCAL): Leer imagenes
         ine_bytes = await ine.read()
         selfie_bytes = await selfie.read()
-
         ine_img = bytes_a_imagen(ine_bytes)
         selfie_img = bytes_a_imagen(selfie_bytes)
 
-        # --- Paso 2 (LOCAL): Recortar el rostro principal de cada imagen ---
-        # Solo el recorte del rostro saldra de tu computadora
+        # Paso 2 (LOCAL): Recortar el rostro principal de cada imagen
         rostro_ine = detectar_rostro_principal(ine_img)
         rostro_selfie = detectar_rostro_principal(selfie_img)
 
-        # --- Paso 3 (LOCAL): Extraer texto de la INE con EasyOCR ---
-        # La imagen completa de la INE NUNCA se envia a ningun servicio externo
+        # Paso 3 (LOCAL): Extraer texto de la INE con EasyOCR
         textos = lector_ocr.readtext(ine_img, detail=0)
         texto_extraido = "\n".join(textos) if textos else "No se encontro texto"
 
-        # --- Paso 4 (REMOTO): Comparar rostros via Gemini ---
-        # Solo se envian los recortes de rostro (sin texto, sin datos personales)
+        # Paso 4 (REMOTO): Comparar rostros con doble verificacion
         rostro_ine_b64 = imagen_a_base64(rostro_ine)
         rostro_selfie_b64 = imagen_a_base64(rostro_selfie)
+        imagenes = [rostro_ine_b64, rostro_selfie_b64]
 
-        resultado = llamar_openrouter(PROMPT_COMPARACION, [rostro_ine_b64, rostro_selfie_b64])
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futuro_1 = executor.submit(llamar_openrouter, MODELO_1, PROMPT_COMPARACION, imagenes)
+            futuro_2 = executor.submit(llamar_openrouter, MODELO_2, PROMPT_COMPARACION, imagenes)
+            resultado_1 = futuro_1.result()
+            resultado_2 = futuro_2.result()
+
+        # Paso 5: Doble verificacion - ambos deben aprobar
+        match_1 = resultado_1.get("misma_persona", False)
+        match_2 = resultado_2.get("misma_persona", False)
+        sim_1 = resultado_1.get("similitud", 0)
+        sim_2 = resultado_2.get("similitud", 0)
+
+        misma_persona = match_1 and match_2
+        similitud = round((sim_1 + sim_2) / 2)
+
+        # Construir explicacion
+        exp_1 = resultado_1.get("explicacion", "")
+        exp_2 = resultado_2.get("explicacion", "")
+        if match_1 != match_2:
+            explicacion = f"Resultado parcial: un modelo aprueba y otro rechaza. {exp_1 or exp_2}"
+        else:
+            explicacion = exp_1 if len(exp_1) >= len(exp_2) else exp_2
 
         return {
-            "misma_persona": resultado.get("misma_persona", False),
-            "similitud": resultado.get("similitud", 0),
-            "texto_extraido": texto_extraido
+            "misma_persona": misma_persona,
+            "similitud": similitud,
+            "explicacion": explicacion or "",
+            "texto_extraido": texto_extraido,
         }
 
     except ValueError as e:
-        raise HTTPException(
-            status_code=400,
-            detail=str(e)
-        )
+        raise HTTPException(status_code=400, detail=str(e))
     except json.JSONDecodeError as e:
         raise HTTPException(
             status_code=500,
@@ -270,7 +276,13 @@ async def verificar_identidad(
 # -----------------------------------------------------------------------------
 @app.get("/api/health")
 async def health_check():
-    return {"status": "ok", "servicio": "KYC Validador de Identidad", "modelo": OPENROUTER_MODEL}
+    return {
+        "status": "ok",
+        "servicio": "KYC Validador de Identidad",
+        "modelos": [MODELO_1, MODELO_2],
+        "verificacion": "doble",
+        "procesamiento_local": ["deteccion_rostros", "ocr"]
+    }
 
 # -----------------------------------------------------------------------------
 # 8. ARRANQUE DEL SERVIDOR
@@ -279,4 +291,6 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
     print(f"Iniciando servidor en http://0.0.0.0:{port}")
+    print(f"Doble verificacion: {MODELO_1} + {MODELO_2}")
+    print("Procesamiento local: deteccion de rostros (OpenCV) + OCR (EasyOCR)")
     uvicorn.run(app, host="0.0.0.0", port=port)

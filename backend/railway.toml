@@ -1,0 +1,16 @@
+# =============================================================================
+# railway.toml - Configuracion de deploy del Backend en Railway
+# =============================================================================
+
+[build]
+# Railway usara el Dockerfile para construir la imagen
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Health check: Railway verifica que el servicio este vivo
+healthcheckPath = "/api/health"
+# Tiempo maximo para que el servicio arranque (los modelos de IA tardan)
+healthcheckTimeout = 300
+# Reiniciar si el servicio se cae
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3

@@ -1,0 +1,8 @@
+# Framework web para la API REST
+fastapi==0.115.6
+# Servidor ASGI que ejecuta FastAPI
+uvicorn==0.34.0
+# Soporte para recibir archivos (multipart/form-data)
+python-multipart==0.0.20
+# Carga de variables de entorno desde archivo .env
+python-dotenv==1.0.1

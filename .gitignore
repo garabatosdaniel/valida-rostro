@@ -1,0 +1,43 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+backend_env/
+venv/
+.venv/
+
+# ===== Node =====
+node_modules/
+frontend/dist/
+
+# ===== Variables de entorno (nunca subir secretos) =====
+.env
+.env.local
+.env.production
+
+# ===== Archivos temporales =====
+temp_*
+*.tmp
+
+# ===== IDEs =====
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+
+# ===== Datos de prueba (fotos personales) =====
+samples/
+
+# ===== Claude Code =====
+.claude/
+
+# ===== Modelos descargados de IA =====
+*.h5
+*.pb
+*.onnx

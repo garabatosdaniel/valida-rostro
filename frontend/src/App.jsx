@@ -1,6 +1,70 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000"
+
+// Credenciales MVP (hardcoded)
+const USERS = { jorge: "rahd-jrg" }
+
+function LoginModal({ onLogin }) {
+  const [user, setUser] = useState('')
+  const [pass, setPass] = useState('')
+  const [error, setError] = useState('')
+
+  const handleSubmit = (e) => {
+    e.preventDefault()
+    if (USERS[user] === pass) {
+      sessionStorage.setItem('kyc_auth', user)
+      onLogin(user)
+    } else {
+      setError('Usuario o contrasena incorrectos')
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-zinc-50 flex items-center justify-center px-4 font-sans antialiased">
+      <div className="w-full max-w-sm">
+        <div className="text-center mb-8">
+          <h1 className="text-2xl font-extrabold text-zinc-900 tracking-tight">Validador KYC</h1>
+          <p className="mt-2 text-sm text-zinc-500">Inicia sesion para continuar</p>
+        </div>
+        <div className="bg-white border border-zinc-200 rounded-2xl p-8">
+          <form onSubmit={handleSubmit} className="space-y-5">
+            <div>
+              <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">Usuario</label>
+              <input
+                type="text"
+                value={user}
+                onChange={(e) => { setUser(e.target.value); setError('') }}
+                className="w-full px-4 py-2.5 border border-zinc-200 rounded-lg text-sm text-zinc-900 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-transparent"
+                placeholder="Ingresa tu usuario"
+                autoFocus
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">Contrasena</label>
+              <input
+                type="password"
+                value={pass}
+                onChange={(e) => { setPass(e.target.value); setError('') }}
+                className="w-full px-4 py-2.5 border border-zinc-200 rounded-lg text-sm text-zinc-900 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-transparent"
+                placeholder="Ingresa tu contrasena"
+              />
+            </div>
+            {error && (
+              <p className="text-sm text-red-600">{error}</p>
+            )}
+            <button
+              type="submit"
+              className="w-full py-2.5 bg-zinc-900 text-white rounded-lg text-sm font-semibold hover:bg-zinc-800 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-zinc-900"
+            >
+              Iniciar sesion
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 const IconUser = () => (
   <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
@@ -30,6 +94,8 @@ const IconShield = () => (
 )
 
 function App() {
+  const [autenticado, setAutenticado] = useState(!!sessionStorage.getItem('kyc_auth'))
+  const [usuario, setUsuario] = useState(sessionStorage.getItem('kyc_auth') || '')
   const [vista, setVista] = useState('individual')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [ine, setIne] = useState(null)
@@ -95,6 +161,17 @@ function App() {
     }
   }
 
+  const cerrarSesion = () => {
+    sessionStorage.removeItem('kyc_auth')
+    setAutenticado(false)
+    setUsuario('')
+    limpiar()
+  }
+
+  if (!autenticado) {
+    return <LoginModal onLogin={(u) => { setAutenticado(true); setUsuario(u) }} />
+  }
+
   const similitudColor = (sim) => {
     if (sim >= 80) return "text-emerald-600"
     if (sim >= 50) return "text-amber-600"
@@ -155,8 +232,18 @@ function App() {
             </div>
           </div>
 
-          <div className="px-6 py-4 border-t border-zinc-200">
-            <p className="text-xs text-zinc-400">Datos personales procesados localmente</p>
+          <div className="px-4 py-4 border-t border-zinc-200">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-zinc-100 text-xs font-semibold text-zinc-600 uppercase">
+                  {usuario.charAt(0)}
+                </span>
+                <span className="text-sm font-medium text-zinc-700">{usuario}</span>
+              </div>
+              <button onClick={cerrarSesion} className="text-xs text-zinc-400 hover:text-zinc-600 transition-colors">
+                Salir
+              </button>
+            </div>
           </div>
         </div>
       </aside>

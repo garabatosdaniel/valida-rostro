@@ -6,3 +6,7 @@ uvicorn==0.34.0
 python-multipart==0.0.20
 # Carga de variables de entorno desde archivo .env
 python-dotenv==1.0.1
+# Procesamiento de imagenes y deteccion de rostros (OpenCV DNN)
+opencv-python-headless==4.11.0.86
+# Motor OCR para extraer texto de imagenes (local, usa PyTorch)
+easyocr==1.7.2

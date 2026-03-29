@@ -5,21 +5,31 @@
 # (una INE/identificacion y una selfie), las compara usando IA para
 # determinar si son la misma persona, y extrae el texto visible.
 #
+# Enfoque hibrido de privacidad:
+#   - Deteccion de rostros: LOCAL (OpenCV DNN) - nada sale de tu computadora
+#   - Extraccion de texto:  LOCAL (EasyOCR) - nada sale de tu computadora
+#   - Comparacion facial:   OpenRouter/Gemini - solo se envian recortes de rostro
+#                           (sin datos personales, sin texto de la INE)
+#
 # Tecnologias:
 #   - FastAPI: Framework web rapido para crear la API REST
-#   - OpenRouter + Gemini: API de vision para comparacion facial y OCR
+#   - OpenCV DNN: Deteccion y recorte de rostros (local, sin GPU)
+#   - EasyOCR: Extraccion de texto de la identificacion (local)
+#   - OpenRouter + Gemini: Comparacion facial (solo recortes de rostro)
 #
 # Para correr en local:
 #   python main.py
-#
-# Railway inyecta la variable PORT automaticamente al desplegar.
 # =============================================================================
 
 import os
+import io
 import base64
 import json
 import urllib.request
 
+import cv2
+import numpy as np
+import easyocr
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -32,16 +42,12 @@ load_dotenv()
 app = FastAPI(
     title="KYC Validador de Identidad",
     description="API para verificacion facial y extraccion de texto (OCR)",
-    version="2.0.0"
+    version="3.0.0"
 )
 
 # -----------------------------------------------------------------------------
 # 2. CONFIGURACION DE CORS
 # -----------------------------------------------------------------------------
-# CORS permite que el frontend (React) se comunique con este backend.
-# La variable ALLOWED_ORIGINS se configura en .env:
-#   - Local: http://localhost:5173
-#   - Produccion: https://tu-frontend.railway.app
 allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
 
 app.add_middleware(
@@ -61,23 +67,90 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 if not OPENROUTER_API_KEY:
     print("ADVERTENCIA: No se encontro OPENROUTER_API_KEY en las variables de entorno.")
-    print("Configura tu API key en el archivo .env")
 
 # -----------------------------------------------------------------------------
-# 4. FUNCION AUXILIAR: Convertir UploadFile a base64
+# 4. CARGA DE MODELOS LOCALES
 # -----------------------------------------------------------------------------
-async def archivo_a_base64(archivo: UploadFile) -> str:
-    """Lee un archivo subido y lo convierte a base64 para enviarlo a la API."""
-    contenido = await archivo.read()
-    return base64.b64encode(contenido).decode()
+# 4a. Detector de rostros OpenCV DNN (SSD basado en ResNet-10)
+# Detecta rostros con alta precision sin necesidad de GPU ni TensorFlow.
+MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
+face_net = cv2.dnn.readNetFromCaffe(
+    os.path.join(MODELS_DIR, "deploy.prototxt"),
+    os.path.join(MODELS_DIR, "res10_300x300_ssd_iter_140000.caffemodel")
+)
+print("Modelo de deteccion facial cargado (OpenCV DNN).")
+
+# 4b. EasyOCR para extraccion de texto (local, usa PyTorch)
+print("Cargando modelo OCR EasyOCR (idioma: espanol)...")
+lector_ocr = easyocr.Reader(['es'], gpu=False)
+print("Modelo OCR cargado exitosamente.")
 
 # -----------------------------------------------------------------------------
-# 5. FUNCION AUXILIAR: Llamar a OpenRouter con imagenes
+# 5. FUNCIONES AUXILIARES
 # -----------------------------------------------------------------------------
+
+def bytes_a_imagen(contenido: bytes) -> np.ndarray:
+    """Convierte bytes de un archivo de imagen a un array OpenCV (BGR)."""
+    arr = np.frombuffer(contenido, np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("No se pudo decodificar la imagen")
+    return img
+
+
+def detectar_rostro_principal(img: np.ndarray, min_confianza: float = 0.5) -> np.ndarray:
+    """
+    Detecta todos los rostros en la imagen usando OpenCV DNN y retorna
+    el recorte del rostro mas grande (mayor area en pixeles).
+
+    Esto es clave para la INE: tiene una foto principal (grande, color)
+    y una foto fantasma (pequena, gris). Siempre tomamos la mas grande.
+    """
+    h, w = img.shape[:2]
+    blob = cv2.dnn.blobFromImage(img, 1.0, (300, 300), (104.0, 177.0, 123.0))
+    face_net.setInput(blob)
+    detecciones = face_net.forward()
+
+    rostros = []
+    for i in range(detecciones.shape[2]):
+        confianza = detecciones[0, 0, i, 2]
+        if confianza > min_confianza:
+            box = detecciones[0, 0, i, 3:7] * np.array([w, h, w, h])
+            x1, y1, x2, y2 = box.astype(int)
+            # Clamp a los limites de la imagen
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+            area = (x2 - x1) * (y2 - y1)
+            if area > 0:
+                rostros.append((x1, y1, x2, y2, area))
+
+    if not rostros:
+        raise ValueError("No se detecto ningun rostro en la imagen")
+
+    # Tomar el rostro mas grande
+    x1, y1, x2, y2, _ = max(rostros, key=lambda r: r[4])
+
+    # Agregar padding del 20% para incluir mas contexto facial
+    pad_w = int(0.2 * (x2 - x1))
+    pad_h = int(0.2 * (y2 - y1))
+    x1 = max(0, x1 - pad_w)
+    y1 = max(0, y1 - pad_h)
+    x2 = min(w, x2 + pad_w)
+    y2 = min(h, y2 + pad_h)
+
+    return img[y1:y2, x1:x2]
+
+
+def imagen_a_base64(img: np.ndarray) -> str:
+    """Codifica un array OpenCV (BGR) a base64 JPEG."""
+    _, buffer = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    return base64.b64encode(buffer).decode()
+
+
 def llamar_openrouter(prompt: str, imagenes_b64: list[str]) -> dict:
     """
     Envia un prompt con imagenes a OpenRouter y retorna la respuesta parseada.
-    Las imagenes se envian como base64 en formato OpenAI-compatible.
+    NOTA: en esta version solo se envian recortes de rostro, no la INE completa.
     """
     content = [{"type": "text", "text": prompt}]
     for img in imagenes_b64:
@@ -112,23 +185,19 @@ def llamar_openrouter(prompt: str, imagenes_b64: list[str]) -> dict:
 # -----------------------------------------------------------------------------
 # 6. ENDPOINT PRINCIPAL: /api/verificar
 # -----------------------------------------------------------------------------
-# Recibe dos imagenes via POST (multipart/form-data):
-#   - ine: Foto de la identificacion oficial (INE, pasaporte, etc.)
-#   - selfie: Foto selfie de la persona
-#
-# Envia ambas imagenes a Gemini en una sola llamada para:
-#   1. Comparar los rostros y determinar si es la misma persona
-#   2. Extraer el texto visible de la identificacion (OCR)
-PROMPT_VERIFICACION = """Analiza estas dos imagenes. La primera es una identificacion oficial (INE/pasaporte) y la segunda es una selfie de una persona.
+# Flujo de privacidad:
+#   1. Recibe INE + selfie
+#   2. LOCAL: OpenCV detecta y recorta el rostro principal de cada imagen
+#   3. LOCAL: EasyOCR extrae el texto de la INE completa
+#   4. REMOTO: Solo los recortes de rostro se envian a Gemini para comparar
+#   -> Ningun dato personal (nombre, CURP, direccion) sale de tu computadora
 
-Realiza estas dos tareas:
+PROMPT_COMPARACION = """Analiza estas dos fotos de rostros. La primera es un recorte de una identificacion oficial y la segunda es una selfie.
 
-1. COMPARACION FACIAL: Compara el rostro de la identificacion con el rostro de la selfie. La identificacion puede tener una foto principal (grande, a color) y una foto fantasma (pequena, gris). Usa la foto principal para comparar.
-
-2. EXTRACCION DE TEXTO: Extrae todo el texto visible de la identificacion (nombres, CURP, clave de elector, direccion, etc.).
+Determina si es la misma persona comparando rasgos faciales.
 
 Responde UNICAMENTE con un JSON valido con esta estructura exacta:
-{"misma_persona": true/false, "similitud": 0-100, "texto_extraido": "todo el texto encontrado separado por saltos de linea"}
+{"misma_persona": true/false, "similitud": 0-100}
 
 No agregues explicaciones, solo el JSON."""
 
@@ -144,19 +213,41 @@ async def verificar_identidad(
         )
 
     try:
-        # Paso 1: Convertir imagenes a base64
-        ine_b64 = await archivo_a_base64(ine)
-        selfie_b64 = await archivo_a_base64(selfie)
+        # --- Paso 1: Leer imagenes en memoria ---
+        ine_bytes = await ine.read()
+        selfie_bytes = await selfie.read()
 
-        # Paso 2: Enviar a Gemini via OpenRouter (comparacion facial + OCR en una llamada)
-        resultado = llamar_openrouter(PROMPT_VERIFICACION, [ine_b64, selfie_b64])
+        ine_img = bytes_a_imagen(ine_bytes)
+        selfie_img = bytes_a_imagen(selfie_bytes)
+
+        # --- Paso 2 (LOCAL): Recortar el rostro principal de cada imagen ---
+        # Solo el recorte del rostro saldra de tu computadora
+        rostro_ine = detectar_rostro_principal(ine_img)
+        rostro_selfie = detectar_rostro_principal(selfie_img)
+
+        # --- Paso 3 (LOCAL): Extraer texto de la INE con EasyOCR ---
+        # La imagen completa de la INE NUNCA se envia a ningun servicio externo
+        textos = lector_ocr.readtext(ine_img, detail=0)
+        texto_extraido = "\n".join(textos) if textos else "No se encontro texto"
+
+        # --- Paso 4 (REMOTO): Comparar rostros via Gemini ---
+        # Solo se envian los recortes de rostro (sin texto, sin datos personales)
+        rostro_ine_b64 = imagen_a_base64(rostro_ine)
+        rostro_selfie_b64 = imagen_a_base64(rostro_selfie)
+
+        resultado = llamar_openrouter(PROMPT_COMPARACION, [rostro_ine_b64, rostro_selfie_b64])
 
         return {
             "misma_persona": resultado.get("misma_persona", False),
             "similitud": resultado.get("similitud", 0),
-            "texto_extraido": resultado.get("texto_extraido", "No se encontro texto")
+            "texto_extraido": texto_extraido
         }
 
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
+        )
     except json.JSONDecodeError as e:
         raise HTTPException(
             status_code=500,

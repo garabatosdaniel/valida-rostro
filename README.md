@@ -1,12 +1,27 @@
 # Validador KYC - Verificacion de Identidad
 
-Sistema de verificacion de identidad (Know Your Customer) que compara rostros entre una identificacion oficial y una selfie, y extrae texto de documentos. Usa IA multimodal (Gemini) via OpenRouter para realizar ambas tareas en una sola llamada.
+Sistema de verificacion de identidad (Know Your Customer) que compara rostros entre una identificacion oficial y una selfie, y extrae texto de documentos.
+
+Usa un **enfoque hibrido de privacidad**: la deteccion de rostros y el OCR se ejecutan localmente, y solo los recortes de rostro (sin datos personales) se envian a Gemini para la comparacion facial.
+
+## Privacidad de datos
+
+| Proceso | Donde se ejecuta | Datos que salen de tu computadora |
+|---|---|---|
+| Deteccion y recorte de rostros | LOCAL (OpenCV DNN) | Ninguno |
+| Extraccion de texto (OCR) | LOCAL (EasyOCR) | Ninguno |
+| Comparacion facial | REMOTO (OpenRouter/Gemini) | Solo recortes de rostro (~100-200KB) |
+
+Los datos personales de la identificacion (nombre, CURP, direccion, clave de elector) **nunca salen de tu computadora**.
 
 ## Stack Tecnologico
 
 | Componente | Tecnologia |
 |---|---|
-| Backend (API) | Python, FastAPI, OpenRouter (Gemini) |
+| Backend (API) | Python, FastAPI |
+| Deteccion de rostros | OpenCV DNN (local, SSD ResNet-10) |
+| Extraccion de texto | EasyOCR (local, PyTorch) |
+| Comparacion facial | OpenRouter + Gemini (remoto, solo rostros) |
 | Frontend (UI) | React, Vite, Tailwind CSS |
 | Deploy | Docker, Railway |
 
@@ -15,8 +30,11 @@ Sistema de verificacion de identidad (Know Your Customer) que compara rostros en
 ```
 valida-rostro/
 ├── backend/
-│   ├── main.py              # API principal (FastAPI + OpenRouter)
+│   ├── main.py              # API principal (FastAPI)
 │   ├── requirements.txt     # Dependencias Python
+│   ├── models/              # Modelos de deteccion facial (OpenCV DNN)
+│   │   ├── deploy.prototxt
+│   │   └── res10_300x300_ssd_iter_140000.caffemodel
 │   ├── Dockerfile           # Imagen Docker para Railway
 │   ├── railway.toml         # Config de deploy Railway
 │   └── .env.example         # Variables de entorno ejemplo
@@ -45,7 +63,7 @@ valida-rostro/
 ### 1. Clonar el repositorio
 
 ```bash
-git clone https://github.com/tu-usuario/valida-rostro.git
+git clone https://github.com/gmrdaniel/valida-rostro.git
 cd valida-rostro
 ```
 
@@ -81,6 +99,8 @@ Arranca el servidor:
 # Arrancar el servidor (puerto 8000)
 python main.py
 ```
+
+> La primera vez que se ejecuta, EasyOCR descarga los modelos de idioma (~50-100MB). Esto solo ocurre una vez.
 
 **Variables de entorno del backend** (archivo `.env`):
 
@@ -122,6 +142,14 @@ Abre tu navegador en `http://localhost:5173`:
 2. Sube una selfie de la persona
 3. Haz clic en "Verificar Identidad"
 4. El sistema mostrara si es la misma persona, el porcentaje de similitud y el texto extraido
+
+## Como funciona
+
+1. El usuario sube una foto de su INE y una selfie
+2. **LOCAL**: OpenCV DNN detecta los rostros en ambas imagenes y recorta el mas grande (ignora la foto fantasma de la INE)
+3. **LOCAL**: EasyOCR extrae el texto de la INE (nombre, CURP, direccion, etc.)
+4. **REMOTO**: Solo los recortes de rostro se envian a Gemini via OpenRouter para determinar si es la misma persona
+5. El frontend muestra el resultado: si coinciden, porcentaje de similitud y texto extraido
 
 ## Deploy en Railway
 
